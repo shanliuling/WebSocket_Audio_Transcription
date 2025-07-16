@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>WebSocket Audio Transcription</title>
+    <style>
+        #transcriptionResult {
+            white-space: pre-wrap;
+            /* Preserve whitespace and line breaks */
+            background-color: #f5f5f5;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+
+        #recordButton.recording {
+            background-color: red;
+            color: white;
+        }
+    </style>
+</head>
+
+<body>
+    <div>
+        <button id="recordButton">Start Recording</button>
+        <label>
+            language:
+            <input id="lang" type="text" value="auto" />
+        </label>
+        <label>
+            <input type="checkbox" id="speakerVerification"> Speaker Verification
+        </label>
+        <hr />
+        Transcription result will be displayed below:
+        <p id="transcriptionResult"></p>
+    </div>
+</body>
+<script>
+    var recordButton = document.getElementById('recordButton')
+    var transcriptionResult = document.getElementById('transcriptionResult')
+    navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia
+    var ws = null
+    var record = null
+    var timeInte = null
+    var isRecording = false
+
+    recordButton.onclick = function () {
+        if (!isRecording) {
+            startRecording()
+        } else {
+            stopRecording()
+        }
+    }
+
+    function startRecording () {
+        console.log('Start Recording')
+        var speakerVerificationCheckbox = document.getElementById('speakerVerification')
+        var sv = speakerVerificationCheckbox.checked ? 1 : 0
+        var lang = document.getElementById("lang").value
+        // Construct the query parameters
+        var queryParams = []
+        if (lang) {
+            queryParams.push(`lang=${lang}`)
+        }
+        if (sv) {
+            queryParams.push('sv=1')
+        }
+        var queryString = queryParams.length > 0 ? `?${queryParams.join('&')}` : ''
+
+        ws = new WebSocket(`ws://100.64.0.22:27000/ws/transcribe${queryString}`)
+        ws.binaryType = 'arraybuffer'
+
+        ws.onopen = function (event) {
+            console.log('WebSocket connection established')
+            record.start()
+            timeInte = setInterval(function () {
+                if (ws.readyState === 1) {
+                    var audioBlob = record.getBlob()
+
+                    // 只有当有音频数据时才发送
+                    if (audioBlob.size > 0) {
+                        console.log('发送音频数据，大小:', audioBlob.size)
+                        ws.send(audioBlob)
+                        record.clear()
+                        console.log('音频缓冲区已清空')
+                    }
+                }
+            }, 200)
+        }
+
+        ws.onmessage = function (evt) {
+            console.log('Received message: ' + evt.data)
+            try {
+                resJson = JSON.parse(evt.data)
+                if (resJson.code == 0) {
+                    var jsonResponse = JSON.stringify(resJson, null, 4)
+                    transcriptionResult.textContent += "\n" + (resJson.data || 'No speech recognized')
+                }
+            } catch (e) {
+                console.error('Failed to parse response data', e)
+                transcriptionResult.textContent += "\n" + evt.data
+            }
+        }
+
+        ws.onclose = function () {
+            console.log('WebSocket connection closed')
+        }
+
+        ws.onerror = function (error) {
+            console.error('WebSocket error: ' + error)
+        }
+
+        recordButton.textContent = "Stop Recording"
+        recordButton.classList.add("recording")
+        isRecording = true
+    }
+
+    function stopRecording () {
+        console.log('Stop Recording')
+        if (ws) {
+            ws.close()
+            record.stop()
+            clearInterval(timeInte)
+        }
+        recordButton.textContent = "Start Recording"
+        recordButton.classList.remove("recording")
+        isRecording = false
+    }
+
+    function init (rec) {
+        record = rec
+    }
+
+    if (!navigator.getUserMedia) {
+        alert('Your browser does not support audio input')
+    } else {
+        navigator.getUserMedia(
+            {
+                audio: {
+                    noiseSuppression: true,  // 启用降噪
+                    echoCancellation: true,  // 启用回声消除
+                    autoGainControl: true,   // 启用自动增益控制
+                    sampleRate: 16000
+                }
+            },
+            function (mediaStream) {
+                init(new Recorder(mediaStream))
+            },
+            function (error) {
+                console.log(error)
+            }
+        )
+    }
+
+    var Recorder = function (stream) {
+        // VAD (语音活动检测) 相关变量
+        var VAD_STATE = {
+            SILENT: 0,
+            VOICE: 1
+        }
+
+        var SILENCE_THRESHOLD = 0.015 // 静音阈值，可调整 (0.01-0.05)
+        var MIN_SPEECH_FRAMES = 2    // 最小连续语音帧数
+        var MIN_SILENCE_FRAMES = 8   // 最小连续静音帧数
+        var PRE_SPEECH_BUFFER_FRAMES = 3 // 语音前保留的缓冲区帧数
+
+        var currentState = VAD_STATE.SILENT
+        var speechFrames = 0
+        var silenceFrames = 0
+        var preSpeechBuffer = []
+
+        var sampleBits = 16 // Sample bits
+        var inputSampleRate = 48000 // Input sample rate
+        var outputSampleRate = 16000 // Output sample rate
+        var channelCount = 1 // Single channel
+        var context = new AudioContext()
+        var audioInput = context.createMediaStreamSource(stream)
+        var recorder = context.createScriptProcessor(4096, channelCount, channelCount)
+        var audioData = {
+            size: 0,
+            buffer: [],
+            inputSampleRate: inputSampleRate,
+            inputSampleBits: sampleBits,
+            clear: function () {
+                this.buffer = []
+                this.size = 0
+            },
+            input: function (data) {
+                this.buffer.push(new Float32Array(data))
+                this.size += data.length
+            },
+            encodePCM: function () {
+                var bytes = new Float32Array(this.size)
+                var offset = 0
+                for (var i = 0; i < this.buffer.length; i++) {
+                    bytes.set(this.buffer[i], offset)
+                    offset += this.buffer[i].length
+                }
+                var dataLength = bytes.length * (sampleBits / 8)
+                var buffer = new ArrayBuffer(dataLength)
+                var data = new DataView(buffer)
+                offset = 0
+                for (var i = 0; i < bytes.length; i++, offset += 2) {
+                    var s = Math.max(-1, Math.min(1, bytes[i]))
+                    data.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+                }
+                return new Blob([data], { type: 'audio/pcm' })
+            }
+        }
+
+        this.start = function () {
+            audioInput.connect(recorder)
+            recorder.connect(context.destination)
+        }
+
+        this.stop = function () {
+            recorder.disconnect()
+        }
+
+        this.getBlob = function () {
+            return audioData.encodePCM()
+        }
+
+        this.clear = function () {
+            audioData.clear()
+        }
+
+        function downsampleBuffer (buffer, inputSampleRate, outputSampleRate) {
+            if (outputSampleRate === inputSampleRate) {
+                return buffer
+            }
+            var sampleRateRatio = inputSampleRate / outputSampleRate
+            var newLength = Math.round(buffer.length / sampleRateRatio)
+            var result = new Float32Array(newLength)
+            var offsetResult = 0
+            var offsetBuffer = 0
+            while (offsetResult < result.length) {
+                var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio)
+                var accum = 0, count = 0
+                for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                    accum += buffer[i]
+                    count++
+                }
+                result[offsetResult] = accum / count
+                offsetResult++
+                offsetBuffer = nextOffsetBuffer
+            }
+            return result
+        }
+
+        recorder.onaudioprocess = function (e) {
+            // 从音频输入缓冲区获取音频数据的代码。
+            var inputData = e.inputBuffer.getChannelData(0)
+
+            // 1. 计算音量
+            var sum = 0
+            for (var i = 0; i < inputData.length; i++) {
+                sum += Math.abs(inputData[i])
+            }
+            var volume = sum / inputData.length
+
+            // 2. VAD 状态机逻辑
+            if (currentState === VAD_STATE.SILENT) {
+                if (volume > SILENCE_THRESHOLD) {
+                    speechFrames++
+                    if (speechFrames >= MIN_SPEECH_FRAMES) {
+                        console.log("检测到语音开始")
+                        currentState = VAD_STATE.VOICE
+                        silenceFrames = 0
+
+                        // 先清空之前的音频数据，避免累积
+                        audioData.clear()
+                        console.log("清空音频缓冲区")
+
+                        // 将缓冲区中的音频添加到主数据中（包含语音开始前的部分）
+                        preSpeechBuffer.forEach(function (bufferedData) {
+                            var resampled = downsampleBuffer(bufferedData, inputSampleRate, outputSampleRate)
+                            audioData.input(resampled)
+                        })
+                        preSpeechBuffer = []
+                    }
+                } else {
+                    speechFrames = 0
+                }
+            } else if (currentState === VAD_STATE.VOICE) {
+                if (volume < SILENCE_THRESHOLD) {
+                    silenceFrames++
+                    if (silenceFrames >= MIN_SILENCE_FRAMES) {
+                        console.log("检测到静音结束")
+                        currentState = VAD_STATE.SILENT
+                        speechFrames = 0
+                        
+                        // 静音时也清空音频数据，确保下次语音是独立的
+                        setTimeout(function() {
+                            audioData.clear()
+                            console.log("延迟清空音频缓冲区")
+                        }, 100)
+                    }
+                } else {
+                    silenceFrames = 0
+                }
+            }
+
+            // 3. 根据状态处理音频
+            if (currentState === VAD_STATE.VOICE) {
+                // 正在说话，录制音频
+                var resampledData = downsampleBuffer(inputData, inputSampleRate, outputSampleRate)
+                audioData.input(resampledData)
+            } else {
+                // 静音状态，保留少量音频到缓冲区
+                preSpeechBuffer.push(new Float32Array(inputData))
+                if (preSpeechBuffer.length > PRE_SPEECH_BUFFER_FRAMES) {
+                    preSpeechBuffer.shift()
+                }
+            }
+        }
+    };
+
+</script>
+
+</html>
