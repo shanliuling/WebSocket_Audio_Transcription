@@ -81,11 +81,13 @@
 
                     // 只有当有音频数据时才发送
                     if (audioBlob.size > 0) {
-                        console.log('发送音频数据，大小:', audioBlob.size)
+                        console.log('Blob size: ', audioBlob.size)
                         ws.send(audioBlob)
+                        console.log('Sending audio data, blob size:', audioBlob.size)
                         record.clear()
-                        console.log('音频缓冲区已清空')
+                        console.log('Buffer cleared')
                     }
+                    record.clear()
                 }
             }, 200)
         }
@@ -161,10 +163,10 @@
             VOICE: 1
         }
 
-        var SILENCE_THRESHOLD = 0.015 // 静音阈值，可调整 (0.01-0.05)
-        var MIN_SPEECH_FRAMES = 2    // 最小连续语音帧数
-        var MIN_SILENCE_FRAMES = 8   // 最小连续静音帧数
-        var PRE_SPEECH_BUFFER_FRAMES = 3 // 语音前保留的缓冲区帧数
+        var SILENCE_THRESHOLD = 0.02 // 静音阈值，可调整 (0.01-0.05)
+        var MIN_SPEECH_FRAMES = 3    // 最小连续语音帧数
+        var MIN_SILENCE_FRAMES = 10   // 最小连续静音帧数
+        var PRE_SPEECH_BUFFER_FRAMES = 5 // 语音前保留的缓冲区帧数
 
         var currentState = VAD_STATE.SILENT
         var speechFrames = 0
@@ -266,13 +268,9 @@
                 if (volume > SILENCE_THRESHOLD) {
                     speechFrames++
                     if (speechFrames >= MIN_SPEECH_FRAMES) {
-                        console.log("检测到语音开始")
+                        console.log("检测到语音")
                         currentState = VAD_STATE.VOICE
                         silenceFrames = 0
-
-                        // 先清空之前的音频数据，避免累积
-                        audioData.clear()
-                        console.log("清空音频缓冲区")
 
                         // 将缓冲区中的音频添加到主数据中（包含语音开始前的部分）
                         preSpeechBuffer.forEach(function (bufferedData) {
@@ -288,15 +286,9 @@
                 if (volume < SILENCE_THRESHOLD) {
                     silenceFrames++
                     if (silenceFrames >= MIN_SILENCE_FRAMES) {
-                        console.log("检测到静音结束")
+                        console.log("检测到静音")
                         currentState = VAD_STATE.SILENT
                         speechFrames = 0
-                        
-                        // 静音时也清空音频数据，确保下次语音是独立的
-                        setTimeout(function() {
-                            audioData.clear()
-                            console.log("延迟清空音频缓冲区")
-                        }, 100)
                     }
                 } else {
                     silenceFrames = 0
