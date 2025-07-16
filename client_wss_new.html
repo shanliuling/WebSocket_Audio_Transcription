@@ -23,6 +23,7 @@
 </head>
 
 <body>
+    <!-- <script src="recorder-core.js" charset="UTF-8"></script> -->
     <div>
         <button id="recordButton">Start Recording</button>
         <label>
@@ -75,6 +76,10 @@
         ws.onopen = function (event) {
             console.log('WebSocket connection established')
             record.start()
+
+            // 注释掉定时器发送，改为基于分贝的VAD控制发送
+            console.log('使用基于分贝的VAD控制音频发送')
+            /*
             timeInte = setInterval(function () {
                 if (ws.readyState === 1) {
                     var audioBlob = record.getBlob()
@@ -90,6 +95,7 @@
                     record.clear()
                 }
             }, 200)
+            */
         }
 
         ws.onmessage = function (evt) {
@@ -121,10 +127,20 @@
 
     function stopRecording () {
         console.log('Stop Recording')
+
+        // 发送剩余的音频数据
+        if (record) {
+            var audioBlob = record.getBlob()
+            if (audioBlob.size > 0 && ws && ws.readyState === 1) {
+                console.log('停止录音时发送剩余音频数据，大小:', audioBlob.size)
+                ws.send(audioBlob)
+            }
+        }
+
         if (ws) {
             ws.close()
             record.stop()
-            clearInterval(timeInte)
+            // clearInterval(timeInte) // 不再使用定时器
         }
         recordButton.textContent = "Start Recording"
         recordButton.classList.remove("recording")
@@ -157,21 +173,23 @@
     }
 
     var Recorder = function (stream) {
-        // VAD (语音活动检测) 相关变量
+        // 基于分贝的语音检测相关变量
         var VAD_STATE = {
             SILENT: 0,
             VOICE: 1
         }
 
-        var SILENCE_THRESHOLD = 0.02 // 静音阈值，可调整 (0.01-0.05)
-        var MIN_SPEECH_FRAMES = 3    // 最小连续语音帧数
-        var MIN_SILENCE_FRAMES = 10   // 最小连续静音帧数
-        var PRE_SPEECH_BUFFER_FRAMES = 5 // 语音前保留的缓冲区帧数
+        // 分贝阈值设置
+        var DECIBEL_THRESHOLD = -40 // 分贝阈值，可调整 (-60到-20之间)
+        var MIN_VOICE_DURATION = 0.5 // 最小语音持续时间（秒）
+        var MIN_SILENCE_DURATION = 1.0 // 最小静音持续时间（秒）
+        var FRAME_DURATION = 4096 / 48000 // 每帧持续时间（秒）
 
         var currentState = VAD_STATE.SILENT
-        var speechFrames = 0
-        var silenceFrames = 0
+        var voiceDuration = 0 // 当前语音持续时间
+        var silenceDuration = 0 // 当前静音持续时间
         var preSpeechBuffer = []
+        var PRE_SPEECH_BUFFER_DURATION = 0.2 // 语音前保留0.2秒
 
         var sampleBits = 16 // Sample bits
         var inputSampleRate = 48000 // Input sample rate
@@ -229,6 +247,22 @@
             audioData.clear()
         }
 
+        // 计算分贝值
+        function calculateDecibels (buffer) {
+            var sum = 0
+            for (var i = 0; i < buffer.length; i++) {
+                sum += buffer[i] * buffer[i]
+            }
+            var rms = Math.sqrt(sum / buffer.length)
+
+            // 避免对0取对数
+            if (rms < 0.000001) rms = 0.000001
+
+            // 计算分贝值 (相对于满量程)
+            var decibels = 20 * Math.log10(rms)
+            return decibels
+        }
+
         function downsampleBuffer (buffer, inputSampleRate, outputSampleRate) {
             if (outputSampleRate === inputSampleRate) {
                 return buffer
@@ -253,24 +287,20 @@
         }
 
         recorder.onaudioprocess = function (e) {
-            // 从音频输入缓冲区获取音频数据的代码。
             var inputData = e.inputBuffer.getChannelData(0)
 
-            // 1. 计算音量
-            var sum = 0
-            for (var i = 0; i < inputData.length; i++) {
-                sum += Math.abs(inputData[i])
-            }
-            var volume = sum / inputData.length
+            // 1. 计算当前帧的分贝值
+            var currentDecibels = calculateDecibels(inputData)
 
-            // 2. VAD 状态机逻辑
+            // 2. 基于分贝的VAD状态机
             if (currentState === VAD_STATE.SILENT) {
-                if (volume > SILENCE_THRESHOLD) {
-                    speechFrames++
-                    if (speechFrames >= MIN_SPEECH_FRAMES) {
-                        console.log("检测到语音")
+                if (currentDecibels > DECIBEL_THRESHOLD) {
+                    voiceDuration += FRAME_DURATION
+                    silenceDuration = 0
+
+                    if (voiceDuration >= MIN_VOICE_DURATION) {
+                        console.log("检测到语音开始，分贝:", currentDecibels.toFixed(2), "dB，持续时间:", voiceDuration.toFixed(2), "秒")
                         currentState = VAD_STATE.VOICE
-                        silenceFrames = 0
 
                         // 将缓冲区中的音频添加到主数据中（包含语音开始前的部分）
                         preSpeechBuffer.forEach(function (bufferedData) {
@@ -280,18 +310,32 @@
                         preSpeechBuffer = []
                     }
                 } else {
-                    speechFrames = 0
+                    voiceDuration = 0
+                    silenceDuration += FRAME_DURATION
                 }
             } else if (currentState === VAD_STATE.VOICE) {
-                if (volume < SILENCE_THRESHOLD) {
-                    silenceFrames++
-                    if (silenceFrames >= MIN_SILENCE_FRAMES) {
-                        console.log("检测到静音")
+                if (currentDecibels <= DECIBEL_THRESHOLD) {
+                    silenceDuration += FRAME_DURATION
+                    voiceDuration = 0
+
+                    if (silenceDuration >= MIN_SILENCE_DURATION) {
+                        console.log("检测到语音结束，分贝:", currentDecibels.toFixed(2), "dB，静音持续:", silenceDuration.toFixed(2), "秒")
                         currentState = VAD_STATE.SILENT
-                        speechFrames = 0
+
+                        // 立即发送音频数据
+                        if (audioData.size > 0 && ws && ws.readyState === 1) {
+                            var audioBlob = audioData.encodePCM()
+                            console.log("发送语音数据，大小:", audioBlob.size, "字节，时长:", (audioData.size / outputSampleRate).toFixed(2), "秒")
+                            ws.send(audioBlob)
+                            audioData.clear()
+                        }
+
+                        voiceDuration = 0
+                        silenceDuration = 0
                     }
                 } else {
-                    silenceFrames = 0
+                    silenceDuration = 0
+                    voiceDuration += FRAME_DURATION
                 }
             }
 
@@ -303,9 +347,19 @@
             } else {
                 // 静音状态，保留少量音频到缓冲区
                 preSpeechBuffer.push(new Float32Array(inputData))
-                if (preSpeechBuffer.length > PRE_SPEECH_BUFFER_FRAMES) {
+
+                // 保持缓冲区在指定时长内
+                var maxBufferFrames = Math.ceil(PRE_SPEECH_BUFFER_DURATION / FRAME_DURATION)
+                if (preSpeechBuffer.length > maxBufferFrames) {
                     preSpeechBuffer.shift()
                 }
+            }
+
+            // 调试信息（可选，每秒打印一次）
+            if (Math.random() < 0.02) { // 约每秒打印一次
+                console.log("实时分贝:", currentDecibels.toFixed(2), "dB，状态:",
+                    currentState === VAD_STATE.VOICE ? "语音" : "静音",
+                    "，语音时长:", voiceDuration.toFixed(2), "秒")
             }
         }
     };
