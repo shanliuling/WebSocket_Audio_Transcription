@@ -180,16 +180,16 @@
         }
 
         // 分贝阈值设置
-        var DECIBEL_THRESHOLD = -40 // 分贝阈值，可调整 (-60到-20之间)
+        var DECIBEL_THRESHOLD = -30 // 分贝阈值，可调整 (-60到-20之间)
         var MIN_VOICE_DURATION = 0.5 // 最小语音持续时间（秒）
-        var MIN_SILENCE_DURATION = 1.0 // 最小静音持续时间（秒）
+        var MIN_SILENCE_DURATION = 1.5 // 最小静音持续时间（秒）
         var FRAME_DURATION = 4096 / 48000 // 每帧持续时间（秒）
 
         var currentState = VAD_STATE.SILENT
         var voiceDuration = 0 // 当前语音持续时间
         var silenceDuration = 0 // 当前静音持续时间
         var preSpeechBuffer = []
-        var PRE_SPEECH_BUFFER_DURATION = 0.2 // 语音前保留0.2秒
+        var PRE_SPEECH_BUFFER_DURATION = 0.5 // 语音前保留0.2秒
 
         var sampleBits = 16 // Sample bits
         var inputSampleRate = 48000 // Input sample rate
